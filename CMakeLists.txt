@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(trainset LANGUAGES CXX)
+project(train_set LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Threads REQUIRED)
 add_compile_options(-O3 -DNDEBUG)
 
-add_executable(trainset
+add_executable(train_set
         src/aof.cpp
         src/main.cpp
         src/kv.cpp
@@ -17,8 +17,9 @@ add_executable(trainset
         src/config_loader.cpp
         src/resp.cpp
         src/server.cpp
+        src/replicate_client.cpp
 )
 
-target_include_directories(trainset PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(train_set PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-target_link_libraries(trainset PRIVATE Threads::Threads)
+target_link_libraries(train_set PRIVATE Threads::Threads)
