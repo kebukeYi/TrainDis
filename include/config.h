@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 
 namespace train_set {
 
@@ -12,14 +13,16 @@ namespace train_set {
         EverySec,
         Always
     };
+
     struct AofConfig {
         bool enabled = false;
         AofMode mode = AofMode::None;
         std::string dir = "./data";
         std::string file_name = "appendonly.aof";
-        size_t file_pre_alloc_size = 1024 * 1024 * 1024;
-        size_t max_write_buffer_size = 1024 * 1024 * 1024;
+        size_t max_write_buffer_size = 256 * 1024;
         int consume_aof_queue_us = 1500;
+
+        size_t file_pre_alloc_size = 64 * 1024 * 1024;
         int file_sync_interval_ms = 1000; // everySec ms;
         bool file_use_sync_range = false;
         size_t file_use_sync_range_size = 512 * 1024;
@@ -34,7 +37,7 @@ namespace train_set {
 
     struct ReplicateConfig {
         bool enabled = false;
-        std::string master_host;
+        std::string master_host="0.0.0.0";
         uint16_t master_port = 0;
     };
 

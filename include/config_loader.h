@@ -3,3 +3,10 @@
 //
 
 #pragma once
+
+#include "config.h"
+
+namespace train_set {
+
+    bool load_config(const std::string &file_path, ServerConfig &config, std::string &err);
+}

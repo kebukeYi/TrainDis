@@ -52,7 +52,7 @@ namespace train_set {
 
         ~AOFManager();
         bool init(AofConfig& config, std::string & errM);
-        bool load(KVStorage *storage, std::string & errM);
+        bool load(KVStorage &storage, std::string & errM);
         bool appendCmd(std::vector<std::string>& cmds);
         bool appendCmdRaw(std::string &cmd);
         bool isEnabled(){return config.enabled;};
