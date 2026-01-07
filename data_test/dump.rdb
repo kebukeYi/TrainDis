@@ -1,0 +1,10 @@
+MRDB
+STRING 3
+2 mm 2 v3 -1
+3 kkm 2 mm -1
+2 yy 2 uu -1
+HASH 1
+2 hk -1 2
+2 f1 2 v4
+2 f2 2 v2
+ZSET 0
