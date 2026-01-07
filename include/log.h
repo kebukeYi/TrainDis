@@ -15,7 +15,7 @@ namespace train_set {
         auto t = system_clock::to_time_t(system_clock::now());
         char buf[64];
         std::strftime(buf, sizeof(buf), "%F %T", std::localtime(&t));
-        return std::string(buf);
+        return {buf};
     }
 
     void Log(int level, const std::string &msg) {

@@ -50,13 +50,13 @@ namespace train_set {
             } else if (key == "bind_address") {
                 config.host = value;
             } else if (key == "aof.enabled") {
-                config.aof_conf.enabled = value == "yes";
+                config.aof_conf.enabled = value == "true";
             } else if (key == "aof.mode") {
-                if (value == "everySec") {
+                if (value == "everysec") {
                     config.aof_conf.mode = AofMode::EverySec;
                 } else if (value == "always") {
                     config.aof_conf.mode = AofMode::Always;
-                } else if (value == "no") {
+                } else if (value == "none") {
                     config.aof_conf.mode = AofMode::None;
                 } else {
                     err = "invalid aof.mode at line " + std::to_string(line_num);

@@ -5,13 +5,14 @@
 #include "kv.h"
 
 namespace train_set {
+
     struct skipListNode {
         double score;
         std::string member;
         std::vector<skipListNode *> forward;
 
         skipListNode(int level, double score, std::string member) :
-                score(score), member(std::move(member)), forward(level, nullptr) {}
+                score(score), member(std::move(member)), forward((size_t) level, nullptr) {}
     };
 
     skipList::skipList() : head(new skipListNode(maxLevel, 0.0, "")), level(1), length(0) {}
@@ -34,23 +35,28 @@ namespace train_set {
         return level;
     }
 
-    bool compareMember(double a_score, const std::string &a_member,
-                       double b_score, const std::string &b_member) {
+    // static: 当前文件可见, 不作为公共接口, 防止和其他文件同门函数产生链接错误;
+    // 判断 a 是否 小于 b;
+    // 使用 内联 对于频繁调用的小函数，可提高执行效率
+    static inline bool compareMember(double a_score, const std::string &a_member,
+                                     double b_score, const std::string &b_member) {
         if (a_score != b_score) {
             return a_score < b_score;
         }
         return a_member < b_member;
     }
 
-    bool skipList::insert(double score, std::string &member) {
+    bool skipList::insert(double score, const std::string &member) {
+        // 每层的待插入点的前节点[];
         std::vector<skipListNode *> update(maxLevel);
         skipListNode *cur = head;
         for (int i = level - 1; i >= 0; i--) {
             while (cur->forward[i] && compareMember(cur->forward[i]->score, cur->forward[i]->member, score, member)) {
                 cur = cur->forward[i];
             }
-            update[i] = cur;
+            update[(size_t) i] = cur;
         }
+
         cur = cur->forward[0];
         if (cur && cur->member == member && cur->score == score) {
             return false;
@@ -62,18 +68,20 @@ namespace train_set {
             }
             level = newLevel;
         }
+        // 有内存泄露风险;
+        // auto *nx = new SkiplistNode(lvl, score, member);
+        // 使用 unique_ptr 管理新节点, 如果后面任何一步抛异常，unique_ptr 会自动析构，节点被 delete，不会泄漏;
         std::unique_ptr newNode = std::make_unique<skipListNode>(newLevel, score, member);
-        // skipListNode *newNode = new skipListNode(newLevel, score, member);
         for (int i = 0; i < newLevel; i++) {
             newNode->forward[i] = update[i]->forward[i];
             update[i]->forward[i] = newNode.get();
         }
-        auto nullPtr = newNode.release();
+        newNode.release();
         length++;
         return true;
     }
 
-    bool skipList::erase(double score, std::string &member) {
+    bool skipList::erase(double score, const std::string &member) {
         std::vector<skipListNode *> update(maxLevel);
         skipListNode *cur = head;
         for (int i = level - 1; i >= 0; i--) {
@@ -92,6 +100,7 @@ namespace train_set {
             }
         }
         delete cur;
+        // 从顶开始向下判断, 删除的节点是否在 索引中;
         while (level > 1 && head->forward[level - 1] == nullptr) {
             level--;
         }
@@ -103,7 +112,6 @@ namespace train_set {
         if (length == 0) {
             return;
         }
-        skipListNode *cur = head;
         auto n = (int64_t) length;
         auto format = [&](int64_t idx) {
             if (idx < 0) {
@@ -152,25 +160,25 @@ namespace train_set {
     // ---------------- KeyValueStore implementation -----------------
 
     int64_t KVStorage::nowMs() {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     }
 
-    bool KVStorage::set(std::string &key, std::string &value, std::optional<int64_t> ttl_ms) {
+    bool KVStorage::set(const std::string &key, const std::string &value, std::optional<int64_t> ttl_ms) {
         std::lock_guard<std::mutex> lk(mtx);
-        int64_t now_ms = nowMs();
-        int64_t expire_ms = ttl_ms.value_or(-1);
-        expire_ms += now_ms;
-        string_records[key] = StringRecord{value, expire_ms};
-        if (expire_ms >= 0) {
-            expires[key] = expire_ms;
+        int64_t expire_at = -1;
+        if (ttl_ms.has_value()) {
+            expire_at = nowMs() + ttl_ms.value();
+        }
+        string_records[key] = StringRecord{value, expire_at};
+        if (expire_at >= 0) {
+            expires[key] = expire_at;
         } else {
             expires.erase(key);
         }
         return true;
     }
 
-    bool KVStorage::setWithExpire(std::string &key, std::string &value, int64_t expire_at_ms) {
+    bool KVStorage::setWithExpire(const std::string &key, const std::string &value, int64_t expire_at_ms) {
         std::lock_guard<std::mutex> lk(mtx);
         string_records[key] = StringRecord{value, expire_at_ms};
         if (expire_at_ms >= 0) {
@@ -179,7 +187,7 @@ namespace train_set {
         return true;
     }
 
-    std::optional<std::string> KVStorage::get(std::string &key) {
+    std::optional<std::string> KVStorage::get(const std::string &key) {
         std::lock_guard<std::mutex> lk(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfString(key, now_ms);
@@ -190,7 +198,7 @@ namespace train_set {
         return std::make_optional(it->second.value);
     }
 
-    bool KVStorage::exists(std::string &key) {
+    bool KVStorage::exists(const std::string &key) {
         std::lock_guard<std::mutex> lk(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfString(key, now_ms);
@@ -199,7 +207,7 @@ namespace train_set {
                hash_records.find(key) != hash_records.end();
     }
 
-    int KVStorage::del(std::vector<std::string> &keys) {
+    int KVStorage::del(const std::vector<std::string> &keys) {
         std::lock_guard<std::mutex> lk(mtx);
         int count = 0;
         int64_t now_ms = nowMs();
@@ -215,7 +223,7 @@ namespace train_set {
         return count;
     }
 
-    bool KVStorage::expire(std::string &key, int64_t ttl_seconds) {
+    bool KVStorage::expire(const std::string &key, int64_t ttl_seconds) {
         std::lock_guard<std::mutex> lk(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfString(key, now_ms);
@@ -224,16 +232,17 @@ namespace train_set {
             return false;
         }
         if (ttl_seconds < 0) {
-            it->second.expire - 1;
+            it->second.expire = -1;
             expires.erase(key);
-            return false;
+            return true;
         }
         it->second.expire = now_ms + ttl_seconds * 1000;
         expires[key] = it->second.expire;
         return true;
     }
 
-    int64_t KVStorage::getExpire(std::string &key) {
+    // 还剩多久存活时间; 单位/秒;
+    int64_t KVStorage::ttl(const std::string &key) {
         std::lock_guard<std::mutex> lk(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfString(key, now_ms);
@@ -245,7 +254,7 @@ namespace train_set {
             return -1;
         }
         int64_t left_ms = it->second.expire - now_ms;
-        if (left_ms < 0) {
+        if (left_ms <= 0) {
             return -2;
         }
         return left_ms / 1000;
@@ -257,7 +266,7 @@ namespace train_set {
             return 0;
         }
         auto it = expires.begin();
-        std::advance(it, std::rand() % expires.size());
+        std::advance(it, (long)(std::rand() % expires.size()));
         int removed = 0;
         int64_t now = nowMs();
         for (int i = 0; i < max_step && !expires.empty(); ++i) {
@@ -266,7 +275,7 @@ namespace train_set {
             }
             auto key = it->first;
             int64_t when = it->second;
-            if (when > 0 && when <= now) {
+            if (when >= 0 && when <= now) {
                 string_records.erase(key);
                 hash_records.erase(key);
                 zset_records.erase(key);
@@ -279,19 +288,19 @@ namespace train_set {
         return removed;
     }
 
-    bool KVStorage::isExpiredOfString(StringRecord &record, int64_t now_ms) {
+    bool KVStorage::isExpiredOfString(const StringRecord &record, int64_t now_ms) {
         return record.expire >= 0 && record.expire <= now_ms;
     }
 
-    bool KVStorage::isExpiredOfHash(HashRecord &record, int64_t now_ms) {
+    bool KVStorage::isExpiredOfHash(const HashRecord &record, int64_t now_ms) {
         return record.expire >= 0 && record.expire <= now_ms;
     }
 
-    bool KVStorage::isExpiredOfZSet(ZSetRecord &record, int64_t now_ms) {
+    bool KVStorage::isExpiredOfZSet(const ZSetRecord &record, int64_t now_ms) {
         return record.expire >= 0 && record.expire <= now_ms;
     }
 
-    void KVStorage::clearIfExpiredOfString(std::string &key, int64_t now_ms) {
+    void KVStorage::clearIfExpiredOfString(const std::string &key, int64_t now_ms) {
         auto it = string_records.find(key);
         if (it == string_records.end()) {
             return;
@@ -302,7 +311,7 @@ namespace train_set {
         }
     }
 
-    void KVStorage::clearIfExpiredOfHash(std::string &key, int64_t now_ms) {
+    void KVStorage::clearIfExpiredOfHash(const std::string &key, int64_t now_ms) {
         auto it = hash_records.find(key);
         if (it == hash_records.end()) {
             return;
@@ -313,7 +322,7 @@ namespace train_set {
         }
     }
 
-    void KVStorage::clearIfExpiredOfZSet(std::string &key, int64_t now_ms) {
+    void KVStorage::clearIfExpiredOfZSet(const std::string &key, int64_t now_ms) {
         auto it = zset_records.find(key);
         if (it == zset_records.end()) {
             return;
@@ -326,7 +335,7 @@ namespace train_set {
     }
 
     std::vector<std::pair<std::string, StringRecord>> KVStorage::stringSnapshot() {
-        std::lock_guard lock(mtx);
+        std::lock_guard<std::mutex> lock(mtx);
         std::vector<std::pair<std::string, StringRecord>> out;
         out.reserve(string_records.size());
         for (auto &item: string_records) {
@@ -336,7 +345,7 @@ namespace train_set {
     }
 
     std::vector<std::pair<std::string, HashRecord>> KVStorage::hashSnapshot() {
-        std::lock_guard lock(mtx);
+        std::lock_guard<std::mutex> lock(mtx);
         std::vector<std::pair<std::string, HashRecord>> out;
         out.reserve(hash_records.size());
         for (auto &item: hash_records) {
@@ -346,7 +355,7 @@ namespace train_set {
     }
 
     std::vector<KVStorage::ZSetFlat> KVStorage::zSetSnapshot() {
-        std::lock_guard lock(mtx);
+        std::lock_guard<std::mutex> lock(mtx);
         std::vector<KVStorage::ZSetFlat> out;
         out.reserve(zset_records.size());
         for (auto &item: zset_records) {
@@ -358,7 +367,7 @@ namespace train_set {
             } else {
                 flat.items = item.second.items;
             }
-            out.emplace_back(flat);
+            out.emplace_back(std::move(flat));
         }
         return out;
     }
@@ -368,12 +377,21 @@ namespace train_set {
         std::vector<std::string> out;
         out.reserve(string_records.size() + hash_records.size() + zset_records.size());
         for (auto &item: string_records) {
+            if(isExpiredOfString(item.second, nowMs())){
+                continue;
+            }
             out.emplace_back(item.first);
         }
         for (auto &item: hash_records) {
+            if(isExpiredOfHash(item.second, nowMs())){
+                continue;
+            }
             out.emplace_back(item.first);
         }
         for (auto &item: zset_records) {
+            if(isExpiredOfZSet(item.second, nowMs())){
+                continue;
+            }
             out.emplace_back(item.first);
         }
         // 排序, 然后移除相邻的重复元素，保留唯一值;
@@ -383,23 +401,22 @@ namespace train_set {
     }
 
 
-    int KVStorage::hset(std::string &key, std::string &field, std::string &value) {
+    int KVStorage::hset(const std::string &key,const std::string &field,const std::string &value) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfHash(key, now_ms);
+        // 如果 key 不存在，会创建 key -> "" 的映射，并返回 "" 的引用;
         auto &rec = hash_records[key];
         auto it = rec.field_vals.find(key);
         if (it == rec.field_vals.end()) {
-            HashRecord record;
-            record.field_vals[field] = value;
-            hash_records[key] = record;
+            rec.field_vals[field] = value;
             return 1;
         }
-        rec.field_vals[field] = value;
+        it->second = value;
         return 0;
     }
 
-    bool KVStorage::hsetWithExpire(std::string &key, int64_t expire) {
+    bool KVStorage::hsetWithExpire(const std::string &key, int64_t expire) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         auto it = hash_records.find(key);
         if (it == hash_records.end()) {
@@ -414,7 +431,7 @@ namespace train_set {
         return true;
     }
 
-    std::optional<std::string> KVStorage::hget(std::string &key, std::string &field) {
+    std::optional<std::string> KVStorage::hget(const std::string &key, const std::string &field) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfHash(key, now_ms);
@@ -429,7 +446,7 @@ namespace train_set {
         return itt->second;
     }
 
-    int KVStorage::hdel(std::string &key, std::vector<std::string> &fields) {
+    int KVStorage::hdel(const std::string &key, const std::vector<std::string> &fields) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfHash(key, now_ms);
@@ -451,7 +468,7 @@ namespace train_set {
         return count;
     }
 
-    bool KVStorage::hexists(std::string &key, std::string &field) {
+    bool KVStorage::hexists(const std::string &key, const std::string &field) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfHash(key, now_ms);
@@ -463,7 +480,7 @@ namespace train_set {
         return itt != it->second.field_vals.end();
     }
 
-    std::vector<std::string> KVStorage::hgetAllByKey(std::string &key) {
+    std::vector<std::string> KVStorage::hgetAllByKey(const std::string &key) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfHash(key, now_ms);
@@ -474,13 +491,13 @@ namespace train_set {
         }
         out.reserve(it->second.field_vals.size() * 2);
         for (auto &item: it->second.field_vals) {
-            out.emplace_back(item.first);
-            out.emplace_back(item.second);
+            out.push_back(item.first);
+            out.push_back(item.second);
         }
         return out;
     }
 
-    int KVStorage::hlen(std::string &key) {
+    int KVStorage::hlen(const std::string &key) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfHash(key, now_ms);
@@ -488,23 +505,22 @@ namespace train_set {
         if (it == hash_records.end()) {
             return 0;
         }
-        return it->second.field_vals.size();
+        return (int)it->second.field_vals.size();
     }
 
 
-    int KVStorage::zadd(std::string &key, double score, std::string &member) {
+    int KVStorage::zadd(const std::string &key, double score,const std::string &member) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfZSet(key, now_ms);
-        auto it = zset_records.find(key);
-        if (it == zset_records.end()) {
-            return 0;
-        }
-        auto &rec = it->second;
+        auto &rec = zset_records[key];
         auto mit = rec.member_to_score.find(member);
         if (mit == rec.member_to_score.end()) {
+            // 插入逻辑;
+            // 非跳表, 只是容器;
             if (!rec.useSkipList) {
-                auto vec = rec.items;
+                auto &vec = rec.items;
+                // 通过自定义函数, 找到要插入的位置;
                 auto vec_index = std::lower_bound(vec.begin(), vec.end(), std::make_pair(score, member),
                                                   [](auto &a, auto &b) {
                                                       if (a.first != b.first) {
@@ -512,6 +528,7 @@ namespace train_set {
                                                       }
                                                       return a.second < b.second;
                                                   });
+                // 执行插入;
                 vec.insert(vec_index, std::make_pair(score, member));
                 if (vec.size() > ZSetVectorThreshold) {
                     rec.useSkipList = true;
@@ -519,14 +536,17 @@ namespace train_set {
                     for (auto &item: vec) {
                         rec.sl->insert(item.first, item.second);
                     }
-                    rec.items.clear();
+                    // 释放空间;
+                    std::vector<std::pair<double, std::string>>().swap(rec.items);
                 }
             } else {
                 rec.sl->insert(score, member);
             }
+            // 更新 member_to_score 容器映射关系;
             rec.member_to_score.emplace(member, score);
             return 1;
         } else {
+            // 更新逻辑;
             double old_score = mit->second;
             if (old_score == score) {
                 return 0;
@@ -556,7 +576,8 @@ namespace train_set {
                     for (auto &item: vec) {
                         rec.sl->insert(item.first, item.second);
                     }
-                    rec.items.clear();
+                    // 释放原来 vector 的空间;
+                    std::vector<std::pair<double, std::string>>().swap(rec.items);
                 }
             }
 
@@ -565,7 +586,7 @@ namespace train_set {
         }
     }
 
-    bool KVStorage::zaddWithExpire(std::string &key, int64_t expire_at_ms) {
+    bool KVStorage::zaddWithExpire(const std::string &key, int64_t expire_at_ms) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         auto it = zset_records.find(key);
         if (it == zset_records.end()) {
@@ -580,7 +601,7 @@ namespace train_set {
         return true;
     }
 
-    std::vector<std::string> KVStorage::zrange(std::string &key, int64_t start, int64_t end) {
+    std::vector<std::string> KVStorage::zrange(const std::string &key, int64_t start, int64_t end) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfZSet(key, now_ms);
@@ -592,8 +613,8 @@ namespace train_set {
         if (it->second.useSkipList) {
             it->second.sl->rangeByRank(start, end, out);
         } else {
-            auto vec = it->second.items;
-            int64_t n = vec.size();
+            auto &vec = it->second.items;
+            int64_t n = (int64_t )vec.size();
             if (n == 0) {
                 return out;
             }
@@ -608,15 +629,15 @@ namespace train_set {
                 return out;
             }
             for (int64_t i = s; i <= e; ++i) {
-                auto &item = vec[i];
-                out.emplace_back(item.second);
+                auto &item = vec[(size_t)i];
+                out.push_back(item.second);
             }
         }
         return out;
     }
 
 
-    std::optional<double> KVStorage::zscore(std::string &key, std::string &member) {
+    std::optional<double> KVStorage::zscore(const std::string &key, const std::string &member) {
         std::lock_guard<std::mutex> lockGuard(mtx);
         int64_t now_ms = nowMs();
         clearIfExpiredOfZSet(key, now_ms);
@@ -631,7 +652,7 @@ namespace train_set {
         return mit->second;
     }
 
-    int KVStorage::zremove(std::string &key, std::vector<std::string> &members) {
+    int KVStorage::zremove(const std::string &key,const std::vector<std::string> &members) {
         std::lock_guard<std::mutex> lk(mtx);
         int64_t now = nowMs();
         clearIfExpiredOfZSet(key, now);

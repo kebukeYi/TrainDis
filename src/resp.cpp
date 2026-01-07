@@ -2,11 +2,17 @@
 // Created by 19327 on 2025/12/31/星期三.
 //
 #include <charconv>
+#include <iostream>
+#include <map>
 #include "resp.h"
 
 namespace train_set {
     void RespParser::append(std::string_view data) {
         m_buffer.append(data.data(), data.size());
+    }
+
+    void RespParser::clear() {
+        m_buffer.clear();
     }
 
     bool RespParser::parse_line(size_t &pos, std::string &out_line) {
@@ -15,6 +21,7 @@ namespace train_set {
             return false;
         }
         out_line.assign(m_buffer.data() + pos, end - pos);
+        pos = end + 2;
         return true;
     }
 
@@ -48,7 +55,7 @@ namespace train_set {
 
     // $6\r\nfoobar\r\n
     bool RespParser::parse_bulk_string(size_t &pos, RespValue &value) {
-        int64_t len;
+        int64_t len = 0;
         if (!parse_integer(pos, len)) {
             return false;
         }
@@ -60,8 +67,9 @@ namespace train_set {
             return false;
         }
         value.type = RespType::BulkString;
+        // $长度\r\n pos 内容(len) \r\n
         value.bulk_string.assign(m_buffer.data() + pos, len);
-        pos += len;
+        pos += (size_t )len;
         if (!(m_buffer[pos] == '\r' && m_buffer[pos + 1] == '\n')) {
             return false;
         }
@@ -71,7 +79,7 @@ namespace train_set {
 
     // *3\r\n$3\r\nfoo\r\n$3\r\nbar\r\n$5\r\nbazinga\r\n
     bool RespParser::parse_array(size_t &pos, RespValue &value) {
-        int64_t count;
+        int64_t count = 0;
         if (!parse_integer(pos, count)) {
             return false;
         }
@@ -86,6 +94,9 @@ namespace train_set {
         value.array.clear();
         value.array.reserve(count);
         for (int64_t i = 0; i < count; ++i) {
+            if (pos>=m_buffer.size()){
+                return false;
+            }
             char prefix = m_buffer[pos++];
             RespValue item;
             bool ok = false;
@@ -126,9 +137,9 @@ namespace train_set {
         if (m_buffer.empty()) {
             return std::nullopt;
         }
-        RespValue value;
         size_t pos = 0;
         char prefix = m_buffer[pos++];
+        RespValue value;
         bool ok = false;
         switch (prefix) {
             case '+':
@@ -144,6 +155,7 @@ namespace train_set {
                     value.type = RespType::Integer;
                     value.bulk_string = std::to_string(v);
                 }
+                break;
             }
             case '$':
                 ok = parse_bulk_string(pos, value);

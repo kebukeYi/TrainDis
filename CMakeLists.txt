@@ -18,6 +18,12 @@ add_executable(train_set
         src/resp.cpp
         src/server.cpp
         src/replicate_client.cpp
+        src/resp_test.cpp
+        src/config_loader_test.cpp
+        src/kv_test.cpp
+        src/rdb_test.cpp
+        src/server_test.cpp
+        src/aof_test.cpp
 )
 
 target_include_directories(train_set PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

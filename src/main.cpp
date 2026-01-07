@@ -28,7 +28,7 @@ namespace train_set {
                     return false;
                 }
             } else if (arg == "--port") {
-                config.port = (uint16_t)std::stoi(argv[++i]);
+                config.port = (uint16_t) std::stoi(argv[++i]);
             } else if (arg == "--bind") {
                 config.host = argv[++i];
             } else if (arg == "--help") {
@@ -57,11 +57,14 @@ namespace train_set {
     }
 }
 
+// 测试 0
 int main(int argc, char **argv) {
+    // --config ../conf/aof_rdb.conf
     train_set::ServerConfig config;
     if (!train_set::parse_args(argc, argv, config)) {
         return -1;
     }
 
-    train_set::run_server(config);
+    auto ret = train_set::run_server(config);
+    return ret;
 }

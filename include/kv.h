@@ -15,12 +15,12 @@ namespace train_set {
 
     struct StringRecord {
         std::string value;
-        int64_t expire;
+        int64_t expire = -1; // -1 代表永不过期;
     };
 
     struct HashRecord {
         std::unordered_map<std::string, std::string> field_vals;
-        int64_t expire;
+        int64_t expire = -1;
     };
 
     struct skipListNode;
@@ -30,9 +30,9 @@ namespace train_set {
 
         ~skipList();
 
-        bool insert(double score, std::string &member);
+        bool insert(double score, const std::string &member);
 
-        bool erase(double score, std::string &member);
+        bool erase(double score, const std::string &member);
 
         void rangeByRank(int64_t start, int64_t end, std::vector<std::string> &out);
 
@@ -68,21 +68,23 @@ namespace train_set {
         std::mutex mtx;
 
     public:
-        bool set(std::string& key, std::string& value, std::optional<int64_t> expire = std::nullopt);
+        bool set(const std::string &key, const std::string &value, std::optional<int64_t> expire = std::nullopt);
 
-        bool setWithExpire(std::string& key, std::string& value, int64_t expire);
+        bool setWithExpire(const std::string &key, const std::string &value, int64_t expire);
 
-        std::optional<std::string> get(std::string& key);
+        std::optional<std::string> get(const std::string &key);
 
-        int del(std::vector<std::string> &keys);
+        int del(const std::vector<std::string> &keys);
 
-        bool exists(std::string &key);
+        bool exists(const std::string &key);
 
-        bool expire(std::string &key, int64_t expire);
+        bool expire(const std::string &key, int64_t expire);
 
-        int64_t getExpire(std::string &key);
+        int64_t ttl(const std::string &key);
 
-        size_t stringKeySize() { return string_records.size(); }
+        size_t stringKeySize() {
+            return string_records.size();
+        }
 
         //  expire 扫描
         int expireScanStep(int max_step);
@@ -105,51 +107,51 @@ namespace train_set {
         // Hash APIs
         // returns 1 if new field created, 0 if overwritten
         // HSET myhash field1 "foo"
-        int hset(std::string& key, std::string& field, std::string& value);
+        int hset(const std::string &key, const std::string &field, const std::string &value);
 
-        bool hsetWithExpire(std::string& key, int64_t expire);
+        bool hsetWithExpire(const std::string &key, int64_t expire);
 
-        std::optional<std::string> hget(std::string& key, std::string& field);
+        std::optional<std::string> hget(const std::string &key, const std::string &field);
 
-        int hdel(std::string& key, std::vector<std::string> &fields);
+        int hdel(const std::string &key, const std::vector<std::string> &fields);
 
-        bool hexists(std::string& key, std::string& field);
+        bool hexists(const std::string &key, const std::string &field);
 
         // return flatten [field, value, field, value, ...]; 扁平化值返回;
-        std::vector<std::string> hgetAllByKey(std::string& key);
+        std::vector<std::string> hgetAllByKey(const std::string &key);
 
-        int hlen(std::string& key);
+        int hlen(const std::string &key);
 
         // ZSet APIs
         // returns number of new elements added
         // zadd user:rank   kk 90 kk1 89 kk2 88
         // zadd order:rank  mm 90 qw1 89 we6 88
-        int zadd(std::string &key, double score, std::string &member);
+        int zadd(const std::string &key, double score, const std::string &member);
 
-        bool zaddWithExpire(std::string &key, int64_t expire);
+        bool zaddWithExpire(const std::string &key, int64_t expire);
 
         // zrange user:rank 0 -1
-        std::vector<std::string> zrange(std::string& key, int64_t start, int64_t end);
+        std::vector<std::string> zrange(const std::string &key, int64_t start, int64_t end);
 
-        std::optional<double> zscore(std::string &key, std::string &member);
+        std::optional<double> zscore(const std::string &key, const std::string &member);
 
-        int zremove(std::string &key, std::vector<std::string> &members);
+        int zremove(const std::string &key, const std::vector<std::string> &members);
 
     private:
         size_t ZSetVectorThreshold = 128;
 
         static int64_t nowMs();
 
-        static bool isExpiredOfString(StringRecord &record, int64_t now_ms);
+        static bool isExpiredOfString(const StringRecord &record, int64_t now_ms);
 
-        static bool isExpiredOfHash(HashRecord &record, int64_t now_ms);
+        static bool isExpiredOfHash(const HashRecord &record, int64_t now_ms);
 
-        static bool isExpiredOfZSet(ZSetRecord &record, int64_t now_ms);
+        static bool isExpiredOfZSet(const ZSetRecord &record, int64_t now_ms);
 
-        void clearIfExpiredOfString(std::string& key, int64_t now_ms);
+        void clearIfExpiredOfString(const std::string &key, int64_t now_ms);
 
-        void clearIfExpiredOfHash(std::string& key, int64_t now_ms);
+        void clearIfExpiredOfHash(const std::string &key, int64_t now_ms);
 
-        void clearIfExpiredOfZSet(std::string& key, int64_t now_ms);
+        void clearIfExpiredOfZSet(const std::string &key, int64_t now_ms);
     };
 }

@@ -7,28 +7,17 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <sys/uio.h>
+#include <algorithm>
+#include <iostream>
 #include "aof.h"
 
 namespace train_set {
-    // [set, kk , val]
-    // *3 \r\n $3 \r\n set \r\n $2 \r\n kk \r\n $3 \r\n val \r\n
-    std::string toArrayType(std::vector<std::string> &parts) {
-        std::string out;
-        out.reserve(parts.size() * 16);
-        out.append("*").append(std::to_string(parts.size())).append("\r\n");
-        for (auto &part: parts) {
-            out.append("$").append(std::to_string(part.size())).append("\r\n");
-            out.append(part).append("\r\n");
-        }
-        return out;
-    }
-
-    bool writeAllToFd(int fd, char *data, size_t len) {
+    bool writeAllToFd(int fd, const char *data, size_t len) {
         size_t offset = 0;
         while (offset < len) {
             auto w = ::write(fd, data + offset, len - offset);
             if (w > 0) {
-                offset += w;
+                offset += (size_t) w;
                 continue;
             }
             if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
@@ -49,7 +38,20 @@ namespace train_set {
         return dir + "/" + fileName;
     }
 
-    std::string AOFManager::path() {
+    // [set, kk , val]
+    // *3 \r\n $3 \r\n set \r\n $2 \r\n kk \r\n $3 \r\n val \r\n
+    std::string toArrayType(const std::vector<std::string> &parts) {
+        std::string out;
+        out.reserve(parts.size() * 16);
+        out.append("*").append(std::to_string(parts.size())).append("\r\n");
+        for (auto &part: parts) {
+            out.append("$").append(std::to_string(part.size())).append("\r\n");
+            out.append(part).append("\r\n");
+        }
+        return out;
+    }
+
+    std::string AOFManager::path() const {
         return joinPath(config.dir, config.file_name);
     }
 
@@ -59,7 +61,7 @@ namespace train_set {
         shutdown();
     }
 
-    bool AOFManager::init(AofConfig &conf, std::string &err) {
+    bool AOFManager::init(const AofConfig &conf, std::string &err) {
         config = conf;
         if (!config.enabled) {
             return true;
@@ -76,8 +78,8 @@ namespace train_set {
             return false;
         }
 #ifdef __linux__
-        if (config.file_pre_alloc_size) {
-            posix_fallocate(fd, 0, (off_t) config.file_pre_alloc_size);
+        if (config.file_pre_alloc_size > 0) {
+            posix_fallocate(fd, 0, static_cast<off_t>(config.file_pre_alloc_size));
         }
 #endif
         running.store(true);
@@ -87,22 +89,30 @@ namespace train_set {
 
     void AOFManager::shutdown() {
         running.store(false);
+        // 唤醒 消费queue拉取线程, 赶紧去消费;
         write_cond.notify_all();
         if (write_deque_thread.joinable()) {
             write_deque_thread.join();
         }
         if (fd >= 0) {
-            ::fsync(fd);
+            ::fdatasync(fd);
             ::close(fd);
             fd = -1;
         }
     }
 
-    bool AOFManager::appendCmd(std::vector<std::string> &cmds) {
+    bool AOFManager::appendCmd(const std::vector<std::string> &cmds, bool isRaw) {
         if (!config.enabled || fd < 0) {
             return true;
         }
-        std::string cmd = toArrayType(cmds);
+        std::string cmd;
+        if (isRaw) {
+            cmd = cmds[0];
+        } else {
+            // cmd: set key val
+            cmd = toArrayType(cmds);
+        }
+        // cmd: *3\r\n$3\r\nset\r\n$3\r\nkey\r\n$3\r\nval\r\n
         bool need_incr = rewriting.load();
         std::string incr_copy;
         if (need_incr) {
@@ -110,29 +120,32 @@ namespace train_set {
         }
         int64_t my_seq = 0;
         {
-            std::unique_lock<std::mutex> lock(deque_mutex);
+            std::lock_guard<std::mutex> lock(deque_mutex);
             pending_write += cmd.size();
             my_seq = this->seq.fetch_add(1);
             write_queue.push_back(AofItem{std::move(cmd), my_seq});
         }
         if (need_incr) {
-            std::unique_lock<std::mutex> lock(incr_mutex);
+            std::lock_guard<std::mutex> lock(incr_mutex);
             incr_cmd.emplace_back(std::move(incr_copy));
         }
+        // 唤醒 刷盘 线程, 去消费队列中的元素;
         write_cond.notify_one();
+        // 每次写 aof 触发保存; 强一致性;
         if (config.mode == AofMode::Always) {
             std::unique_lock<std::mutex> lock(deque_mutex);
+            // 当前线程等待刷盘完成处理;
             write_commit.wait(lock, [&]() {
-                return last_seq >= my_seq || !running;
+                return last_seq >= my_seq || !running.load();
             });
         }
         return true;
     }
 
-    bool AOFManager::appendCmdRaw(std::string &cmd) {
+    bool AOFManager::appendCmdRaw(const std::string &cmd) {
         std::vector<std::string> parts;
         parts.emplace_back(cmd);
-        return appendCmd(parts);
+        return appendCmd(parts, true);
     }
 
     bool AOFManager::load(KVStorage &storage, std::string &err) {
@@ -141,8 +154,7 @@ namespace train_set {
         }
         auto fd_ = ::open(path().c_str(), O_RDONLY);
         if (fd_ < 0) {
-            err = "open failed: " + path();
-            return false;
+            return true;
         }
         std::string buf;
         buf.resize(1 << 20);
@@ -150,15 +162,17 @@ namespace train_set {
         while (true) {
             ssize_t r = ::read(fd_, buf.data(), buf.size());
             if (r < 0) {
-                err = "read failed: " + path();
+                err = "read aof file failed: " + path();
                 ::close(fd_);
                 return false;
             }
             if (r == 0) {
+                std::cout<<"aof load finish"<<std::endl;
                 break;
             }
-            data.append(buf.data(), r);
+            data.append(buf.data(), static_cast<size_t>(r));
         }
+        std::cout<<"aof load end,data_len: "<<data.size()<<std::endl;
         ::close(fd_);
         size_t pos = 0;
         auto readline = [&](std::string &out) -> bool {
@@ -170,60 +184,71 @@ namespace train_set {
             pos = end + 2;
             return true;
         };
+
         while (pos < data.size()) {
             if (data[pos] != '*') {
-                err = "bad bulk";
-                return false;
+                break;
             }
             pos++;
             std::string line;
             if (!readline(line)) {
-                err = "bad bulk len";
+                err = "aof bad bulk len";
                 return false;
             }
             int token_size = std::stoi(line);
             std::vector<std::string> tokens;
+            // token_size 代表几个 token 数量; set kk mm; 3个;
             tokens.reserve(token_size);
             for (int i = 0; i < token_size; ++i) {
                 if (data[pos] != '$') {
-                    err = "bad bulk";
+                    err = "aof bad bulk, expect $;";
                     return false;
                 }
                 pos++;
                 if (!readline(line)) {
-                    err = "bad bulk len";
+                    err = "aof bad bulk len";
                     return false;
                 }
                 int bulk_len = std::stoi(line);
-                if (pos + bulk_len + 2 > data.size()) {
-                    err = "bad trunc bulk";
+                if (pos + (size_t) bulk_len + 2 > data.size()) {
+                    err = "aof bad trunc";
                     return false;
                 }
                 tokens.emplace_back(data.data() + pos, bulk_len);
-                pos += bulk_len + 2;
-            }
+                pos += (size_t) bulk_len + 2;
+            }// for count over
+
             if (tokens.empty()) {
                 continue;
             }
+
             std::string cmd;
             cmd.reserve(tokens[0].size());
+            // *2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n
             for (char c: tokens[0]) {
                 cmd.push_back((char) ::toupper(c));
             }
+
             if (cmd == "SET" && tokens.size() == 3) {
+                // set key val
                 storage.set(tokens[1], tokens[2]);
             } else if (cmd == "DEL" && tokens.size() >= 2) {
+                // del key1 key2 key3 ...
                 std::vector<std::string> keys(tokens.begin() + 1, tokens.end());
                 storage.del(keys);
             } else if (cmd == "ZADD" && tokens.size() >= 4) {
+                // zadd key 1.1 f1  11 f2
                 storage.zadd(tokens[1], std::stod(tokens[2]), tokens[3]);
             } else if (cmd == "HDEL" && tokens.size() >= 3) {
+                // hdel key f1 f2 f3 ...
                 std::vector<std::string> fields(tokens.begin() + 2, tokens.end());
                 storage.hdel(tokens[1], fields);
             } else if (cmd == "HSET" && tokens.size() >= 4) {
+                // hset key f1 v1
                 storage.hset(tokens[1], tokens[2], tokens[3]);
             } else if (cmd == "EXPIRE" && tokens.size() == 3) {
-                storage.expire(tokens[1], std::stoi(tokens[2]));
+                // expire key 10
+                storage.expire(tokens[1], std::stoll(tokens[2]));
             } else {
                 //
             }
@@ -234,7 +259,7 @@ namespace train_set {
     bool AOFManager::bgWrite(KVStorage &storage, std::string &err) {
         if (!config.enabled) {
             err = "aod disabled";
-            return true;
+            return false;
         }
         bool expected = false;
         if (!rewriting.compare_exchange_strong(expected, true)) {
@@ -249,38 +274,45 @@ namespace train_set {
 namespace train_set {
     void AOFManager::writeLoop() {
         size_t batch_bytes = config.max_write_buffer_size > 0 ? config.max_write_buffer_size : 64 * 1024;
-        auto wait_us = config.consume_aof_queue_us > 0 ? config.consume_aof_queue_us : 1000;
+        auto wait_us = std::chrono::microseconds(config.consume_aof_queue_us > 0 ? config.consume_aof_queue_us : 1000);
         const int iovMax = 64;
+
         std::vector<AofItem> local;
         local.reserve(256);
         while (running.load()) {
             if (pause_write.load()) {
                 std::unique_lock<std::mutex> lock(pause_mutex);
                 pause_write_flag = true;
+                // 通知 aof 重写线程, 我已经暂停了, 你可以继续重写;
                 pause_cond.notify_all();
+                // 暂停写入操作; 等待 aof 重写完毕, 来唤醒;
                 pause_cond.wait(lock, [&]() {
                     return !pause_write.load() || !running.load();
                 });
+                // 被唤醒;
                 pause_write_flag = false;
                 if (!running.load()) {
                     break;
                 }
             }
-
+            // 会调用内部元素的析构函数;
             local.clear();
             size_t bytes = 0;
             {
                 std::unique_lock<std::mutex> lock(deque_mutex);
+                // 待刷盘队列为空;
                 if (write_queue.empty()) {
-                    write_cond.wait_for(lock, std::chrono::milliseconds(wait_us), [&] {
+                    write_cond.wait_for(lock, wait_us, [&] {
                         return !write_queue.empty() || !running.load();
                     });
                 }
+                // 循环从 queue -> local 中; 只拿 kMaxIov 个;
                 while (!write_queue.empty() && bytes < batch_bytes && (int) local.size() < iovMax) {
-                    local.push_back(std::move(write_queue.front()));
+                    local.emplace_back(std::move(write_queue.front()));
                     bytes += local.back().data.size();
                     write_queue.pop_front();
                 }
+                // aof 内存中目前还剩多少字节待刷盘;
                 pending_write -= bytes;
                 if (pending_write < 0) {
                     pending_write = 0;
@@ -288,19 +320,23 @@ namespace train_set {
             }// while local over
 
             if (local.empty()) {
+                // everysec 模式周期性刷盘;
                 if (config.mode == AofMode::EverySec) {
                     auto now = std::chrono::steady_clock::now();
                     auto interval = std::chrono::milliseconds(
                             config.file_sync_interval_ms > 0 ? config.file_sync_interval_ms : 1000);
                     if (now - last_write_time >= interval) {
                         if (fd >= 0) {
+                            // pageCache 刷盘;
                             fdatasync(fd);
                             last_write_time = now;
                         }
                     }
                 }
+                // 进入 always 模式, 但是目前没有数据可写, 继续尝试消费即可;
                 continue;
             }
+            // local 不为空;
             iovec iov[iovMax];
             int iov_count = 0;
             for (auto &item: local) {
@@ -311,21 +347,28 @@ namespace train_set {
                 iov[iov_count].iov_len = item.data.size();
                 iov_count++;
             }
-
+            // 聚合写入，处理部分写;
             int write_idx = 0;
             while (write_idx < iov_count) {
+                // w 成功写入字节数：表示实际写入到文件的字节数;
+                // writev 可以原子地发送多个不连续内存块，但它不保证一次就把你给的全部数据发完（尤其在非阻塞或流量压力大时）;
                 ssize_t w = ::writev(fd, &iov[write_idx], iov_count - write_idx);
                 if (w < 0) {
+                    // 出错：简单退让，避免忙等
                     usleep(1000);
                     break;
                 }
+                // 本次写入字节数;
                 size_t write_len = static_cast<size_t>(w);
-                // 调整iov[];
+                // 调整下次 iov[] 写索引;
                 while (write_len > 0 && write_idx < iov_count) {
+                    // 写入的字节长度 大于当前iov[]中当前索引的块长度;
+                    // 那就累加, 判断下一个块;
                     if (write_len >= iov[write_idx].iov_len) {
                         write_len -= iov[write_idx].iov_len;
                         write_idx++;
                     } else {
+                        // 当前块中 只写入了部分数据, 调整索引, 等待下次写入;
                         iov[write_idx].iov_base = (char *) iov[write_idx].iov_base + write_len;
                         iov[write_idx].iov_len -= write_len;
                         write_len = 0;
@@ -334,19 +377,25 @@ namespace train_set {
                 if (w == 0) {
                     break;
                 }
-            }// while iov over
+            }// while iov[] over
+
+            // Linux 可选: 触发后台回写，平滑尾部写放大;
 #ifdef __linux__
             if (bytes >= config.file_use_sync_range_size && config.file_use_sync_range) {
+                // 对最近写入的区间进行提示。这里为了简化，使用整个文件范围（可能较重），可进一步优化记录 offset
                 off_t cur = ::lseek(fd, 0, SEEK_END);
                 if (cur > 0) {
-                    size_t start = cur - (off_t) bytes;
+                    off_t start = cur - (off_t) bytes;
                     if (start < 0) {
                         start = 0;
                     }
-                    (void) ::sync_file_range(fd, start, (off_t) bytes, SYNC_FILE_RANGE_WRITE);
+                    (void) ::sync_file_range(fd, start,
+                                             (off_t) bytes,
+                                             SYNC_FILE_RANGE_WRITE);
                 }
             }
 #endif
+            // 写完后, 模式处理;
             if (config.mode == AofMode::Always) {
                 fdatasync(fd);
 #ifdef __linux__
@@ -357,6 +406,7 @@ namespace train_set {
                     }
                 }
 #endif
+                // 更新已提交序号并唤醒等待者
                 int64_t max_seq = 0;
                 for (auto &item: local) {
                     max_seq = std::max(max_seq, item.seq);
@@ -365,6 +415,7 @@ namespace train_set {
                     std::lock_guard<std::mutex> lock(deque_mutex);
                     last_seq = std::max(last_seq, max_seq);
                 }
+                // 唤醒等待者-用户线程;
                 write_commit.notify_all();
             } else if (config.mode == AofMode::EverySec) {
                 auto now = std::chrono::steady_clock::now();
@@ -385,14 +436,16 @@ namespace train_set {
             }
         }// while running over
 
-        if (fd > 0) {
+        // 退出前 flush;
+        if (fd >= 0) {
+            // 把剩余队列写完
             while (true) {
                 std::vector<AofItem> reset;
                 size_t bytes = 0;
                 {
-                    std::unique_lock<std::mutex> lock(deque_mutex);
+                    std::lock_guard<std::mutex> lock(deque_mutex);
                     while (!write_queue.empty() && (int) reset.size() < iovMax) {
-                        reset.push_back(std::move(write_queue.front()));
+                        reset.emplace_back(std::move(write_queue.front()));
                         bytes += reset.back().data.size();
                         write_queue.pop_front();
                     }
@@ -447,6 +500,7 @@ namespace train_set {
     }
 
     void AOFManager::rewriteLoop(KVStorage *storage) {
+        // 1) 生成临时文件路径
         std::string temp_path = joinPath(config.dir, config.file_name + ".rewrite.tmp");
         auto temp_fd = ::open(path().c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (temp_fd < 0) {
@@ -454,6 +508,8 @@ namespace train_set {
             return;
         }
 
+        // 2) 遍历快照，输出最小命令集;
+        // String
         {
             auto snap = storage->stringSnapshot();
             for (auto &item: snap) {
@@ -467,7 +523,7 @@ namespace train_set {
                     int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch()).count();
                     int64_t ttl = (r.expire - now) / 1000;
-                    if (ttl < 0) {
+                    if (ttl < 1) {
                         ttl = 1;
                     }
                     std::vector<std::string> e_parts = {"EXPIRE", key, std::to_string(ttl)};
@@ -477,6 +533,7 @@ namespace train_set {
             }
         }
 
+        // Hash
         {
             auto snap = storage->hashSnapshot();
             for (auto &kv: snap) {
@@ -493,7 +550,7 @@ namespace train_set {
                     int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch()).count();
                     int64_t ttl = (r.expire - now) / 1000;
-                    if (ttl < 0) {
+                    if (ttl < 1) {
                         ttl = 1;
                     }
                     std::vector<std::string> e_parts = {"EXPIRE", key, std::to_string(ttl)};
@@ -503,6 +560,7 @@ namespace train_set {
             }
         }
 
+        // ZSet
         {
             auto snap = storage->zSetSnapshot();
             for (auto &zv: snap) {
@@ -518,7 +576,7 @@ namespace train_set {
                     int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch()).count();
                     int64_t ttl = (zv.expire - now) / 1000;
-                    if (ttl < 0) {
+                    if (ttl < 1) {
                         ttl = 1;
                     }
                     std::vector<std::string> e_parts = {"EXPIRE", key, std::to_string(ttl)};
@@ -528,13 +586,18 @@ namespace train_set {
             }
         }
 
-        // 告诉线程 不可继续写入文件了;
+        // 3) 进入切换阶段: 暂停 writer, 等待上一批write写完;
         pause_write.store(true);
         {
             std::unique_lock<std::mutex> lock(pause_mutex);
-            pause_cond.wait(lock, [&] { return pause_write_flag; });
+            // 阻塞等待 writer 暂停;
+            pause_cond.wait(lock, [&] {
+                return pause_write_flag;
+            });
         }
 
+        // 在 writer 暂停期间，阻塞增量缓冲区, 将现存的增量数据追加到aof中, 确保没有遗漏;
+        // 那么假如在此刻宕机, 会发生数据丢失; 也就是在原子更改aof名字时, 发生宕机;
         {
             std::unique_lock<std::mutex> lock(incr_mutex);
             for (auto &cmd: incr_cmd) {
@@ -545,12 +608,14 @@ namespace train_set {
 
         fdatasync(temp_fd);
 
+        // 原子替换并切换 fd;
         {
             std::string final_path = path();
             close(fd);
             close(temp_fd);
             rename(temp_path.c_str(), final_path.c_str());
-            fd = ::open(final_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            fd = ::open(final_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+            // fsync 目录，保证 rename 持久;
             int dfd = open(config.dir.c_str(), O_RDONLY);
             if (dfd >= 0) {
                 fsync(dfd);
@@ -559,6 +624,7 @@ namespace train_set {
         }
 
         pause_write.store(false);
+        // 唤醒 writer 写线程;
         write_cond.notify_all();
 
         {

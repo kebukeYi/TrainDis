@@ -20,9 +20,9 @@ namespace train_set {
 
         ~RDBManager() = default;
 
-        bool load(KVStorage *storage, std::string &err);
+        bool load(KVStorage &storage, std::string &err);
 
-        bool dump(KVStorage *storage, std::string &err);
+        bool dump(KVStorage &storage, std::string &err);
 
         void setConfig(const RdbConfig &config) {
             this->config_ = config;

@@ -10,15 +10,15 @@
 
 namespace train_set {
     enum class RespType {
-        SimpleString,
-        Error,
-        Integer,
-        BulkString,
-        Array,
+        SimpleString,// +OK\r\n
+        Error,// -ERR message\r\n
+        Integer,// :123\r\n
+        BulkString,// $6\r\nfoobar\r\n
+        Array,// *2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n
         Null
     };
     struct RespValue {
-        RespType type;
+        RespType type=RespType::Null;
         std::string bulk_string;
         std::vector<RespValue> array;
     };
@@ -39,6 +39,8 @@ namespace train_set {
 
     public:
         void append(std::string_view data);
+
+        void clear();
 
         std::optional<RespValue> tryParseOne();
 
